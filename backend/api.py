@@ -18,6 +18,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from mensagem_variador import gerar_variacoes
 from whatsapp_client import WhatsAppClient, sanitize_phone
 
 app = FastAPI(title="NeoNumera API")
@@ -75,6 +76,32 @@ class DispatchRequest(BaseModel):
     mensagem: str
     cadencia: int = 50
     dry_run: bool = True
+    gerar_variacoes: bool = True
+
+
+class VariacoesRequest(BaseModel):
+    mensagem: str
+
+
+@app.get("/api/health")
+def health():
+    """Endpoint simples pra confirmar que o backend está no ar (útil pra depurar deploy)."""
+    return {"ok": True}
+
+
+@app.post("/api/mensagem/variacoes")
+def preview_variacoes(req: VariacoesRequest):
+    variantes = gerar_variacoes(req.mensagem, quantidade=2)
+    sem_variacao = [v == req.mensagem for v in variantes]
+    return {
+        "variantes": [req.mensagem] + variantes,
+        "aviso": (
+            "Não foi possível gerar variações muito diferentes pra esse texto "
+            "(nenhuma palavra reconhecida) — considere reescrever manualmente."
+            if all(sem_variacao)
+            else None
+        ),
+    }
 
 
 @app.post("/api/upload")
@@ -137,16 +164,17 @@ def _cadencia_para_delay(cadencia, dry_run):
     return delay
 
 
-def _executar_disparo(fila_ids, mensagem, cadencia, dry_run):
+def _executar_disparo(fila_ids, variantes, cadencia, dry_run):
     cliente = None
     try:
         if not dry_run:
             cliente = WhatsAppClient(session_dir=SESSION_DIR, headless=True)
             cliente.start()
 
-        for item_id, nome, telefone_original in fila_ids:
+        for item_id, nome, telefone_original, variante_idx in fila_ids:
             telefone = sanitize_phone(telefone_original)
             agora = datetime.now().strftime("%H:%M")
+            mensagem = variantes[variante_idx]
 
             if telefone is None:
                 resultado = {"status": "error", "errorReason": "Número inválido"}
@@ -188,6 +216,11 @@ def iniciar_disparo(req: DispatchRequest):
         if not req.dry_run and login_state["client"] is not None:
             raise HTTPException(409, "Existe um login de WhatsApp em andamento. Finalize-o antes de disparar.")
 
+        variantes = [req.mensagem]
+        if req.gerar_variacoes:
+            variantes += gerar_variacoes(req.mensagem, quantidade=2)
+        rotulos = ["A", "B", "C"]
+
         fila = [
             {
                 "id": i + 1,
@@ -198,6 +231,7 @@ def iniciar_disparo(req: DispatchRequest):
                 "time": "",
                 "reply": None,
                 "errorReason": None,
+                "variante": rotulos[i % len(variantes)] if len(variantes) > 1 else "",
             }
             for i, c in enumerate(state["contatos"])
         ]
@@ -208,13 +242,16 @@ def iniciar_disparo(req: DispatchRequest):
             "total": len(fila),
             "enviados": 0,
         }
-        fila_ids = [(item["id"], item["name"], item["phone_original"]) for item in fila]
+        fila_ids = [
+            (item["id"], item["name"], item["phone_original"], i % len(variantes))
+            for i, item in enumerate(fila)
+        ]
 
     thread = threading.Thread(
-        target=_executar_disparo, args=(fila_ids, req.mensagem, req.cadencia, req.dry_run), daemon=True
+        target=_executar_disparo, args=(fila_ids, variantes, req.cadencia, req.dry_run), daemon=True
     )
     thread.start()
-    return {"started": True, "total": len(fila_ids), "dry_run": req.dry_run}
+    return {"started": True, "total": len(fila_ids), "dry_run": req.dry_run, "variantes": variantes}
 
 
 @app.get("/api/queue")

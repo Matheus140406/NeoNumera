@@ -286,7 +286,25 @@ function QrLoginModal({ open, onClose, onConectado }) {
     setLogado(false);
     setQr(null);
 
-    api.iniciarLogin().catch((err) => !cancelado && setErro(err.message));
+    const iniciar = async () => {
+      try {
+        await api.health();
+      } catch {
+        if (!cancelado) {
+          setErro(
+            "Não foi possível falar com o backend. Confira se ele está publicado (Railway/Render) " +
+            "e se VITE_API_URL aponta pra URL certa."
+          );
+        }
+        return;
+      }
+      try {
+        await api.iniciarLogin();
+      } catch (err) {
+        if (!cancelado) setErro(err.message || "Falha ao iniciar o login");
+      }
+    };
+    iniciar();
 
     const poll = async () => {
       try {
@@ -298,6 +316,7 @@ function QrLoginModal({ open, onClose, onConectado }) {
           clearInterval(pollRef.current);
           return;
         }
+        setErro(null);
         setQr(resposta.qr_base64);
       } catch (err) {
         if (!cancelado) setErro(err.message || "Falha ao carregar o QR Code");
@@ -370,10 +389,29 @@ function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, set
   const [mapeamento, setMapeamento] = useState(null);
   const [resumoContatos, setResumoContatos] = useState(null);
   const [enviando, setEnviando] = useState(false);
+  const [variantes, setVariantes] = useState(null);
+  const [carregandoVariantes, setCarregandoVariantes] = useState(false);
   const fileInputRef = useRef(null);
   const pulseCount = 5;
   const speed = 1.4 - (cadence / 100) * 1.1;
-  const insertVar = (v) => setMessage((m) => `${m} {${v}}`);
+
+  useEffect(() => {
+    setVariantes(null);
+  }, [message]);
+
+  const verVariacoes = async () => {
+    if (!message.trim()) return;
+    setCarregandoVariantes(true);
+    try {
+      const resultado = await api.previewVariacoes(message);
+      setVariantes(resultado);
+      if (resultado.aviso) pushToast(resultado.aviso, true);
+    } catch (err) {
+      pushToast(err.message || "Falha ao gerar variações", true);
+    } finally {
+      setCarregandoVariantes(false);
+    }
+  };
 
   const processarArquivo = async (file) => {
     if (!file) return;
@@ -463,13 +501,13 @@ function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, set
         <div className={`${t.surface} border ${t.border} rounded-md`}>
           <div className={`flex items-center justify-between px-3 py-2 border-b ${t.border}`}>
             <span className={`text-xs ${t.textSecondary}`}>Editor de mensagem</span>
-            <div className="flex gap-1">
-              {["nome", "codigo", "vencimento"].map((v) => (
-                <button key={v} onClick={() => insertVar(v)} className={`text-[11px] px-1.5 py-0.5 rounded border ${t.border} ${t.textFaint} ${t.hover} transition-colors`}>
-                  {`{${v}}`}
-                </button>
-              ))}
-            </div>
+            <button
+              onClick={verVariacoes}
+              disabled={carregandoVariantes || !message.trim()}
+              className={`text-[11px] px-2 py-1 rounded border ${t.border} ${t.textFaint} ${t.hover} transition-colors disabled:opacity-40`}
+            >
+              {carregandoVariantes ? "Gerando..." : "Ver variações geradas"}
+            </button>
           </div>
           <textarea
             value={message}
@@ -477,7 +515,27 @@ function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, set
             rows={4}
             className={`w-full px-3 py-2.5 text-sm bg-transparent outline-none resize-none ${t.textPrimary} ${FOCUS_RING}`}
           />
+          <p className={`text-[11px] ${t.textFaint} px-3 pb-2`}>
+            Ao disparar de verdade, o sistema gera automaticamente mais 2 variações desse texto
+            (troca de sinônimos) e roda entre os contatos, pra reduzir o padrão repetido de spam.
+          </p>
         </div>
+
+        {variantes && (
+          <div className={`${t.surface} border ${t.border} rounded-md overflow-hidden`}>
+            <div className={`px-3 py-2 border-b ${t.border} text-xs ${t.textSecondary}`}>
+              Variações que serão enviadas (rotação A/B/C)
+            </div>
+            <div className="divide-y divide-zinc-800">
+              {variantes.variantes.map((v, i) => (
+                <div key={i} className="px-3 py-2 flex gap-2 text-xs">
+                  <span className={`shrink-0 font-medium ${t.textFaint}`}>{["A", "B", "C"][i]}</span>
+                  <span className={t.textSecondary}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="space-y-4">
@@ -689,7 +747,10 @@ function QueueTable({ pushToast }) {
                   style={{ animation: "nn-rowIn 0.35s ease both", animationDelay: `${i * 35}ms` }}
                 >
                   <td className="px-4 py-2.5">
-                    <p className={t.textPrimary}>{r.name}</p>
+                    <p className={t.textPrimary}>
+                      {r.name}
+                      {r.variante && <span className={`ml-1.5 text-[10px] ${t.textFaint}`}>· variação {r.variante}</span>}
+                    </p>
                     <p className={`font-mono ${t.textFaint}`}>{maskPhone(r.phone, maskPII)}</p>
                   </td>
                   <td className="px-4 py-2.5 align-top">
