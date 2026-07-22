@@ -53,6 +53,22 @@ class WhatsAppClient:
             print("Tempo esgotado esperando o login. Tente novamente.")
             return False
 
+    def abrir_pagina_login(self):
+        """Abre o WhatsApp Web sem bloquear — usado pelo fluxo de QR Code via API."""
+        self.page.goto(WHATSAPP_URL)
+
+    def esta_logado(self, timeout_ms=1500):
+        """Checagem não-bloqueante (curta) de se a sessão já está logada."""
+        try:
+            self.page.wait_for_selector(SEL_CHAT_LOADED, timeout=timeout_ms)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    def screenshot_png(self):
+        """Captura a tela atual (usada para exibir o QR Code no painel web)."""
+        return self.page.screenshot()
+
     def send_message(self, phone, message, wait_after_load=6, humanize=True):
         """Envia `message` para `phone` (formato 55DDNNNNNNNNN). Retorna (status, detalhe)."""
         url = f"{WHATSAPP_URL}/send?phone={phone}"

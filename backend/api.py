@@ -5,6 +5,8 @@ planilha, disparo em background, fila de status e métricas agregadas.
 Estado mantido em memória — processo único, sem persistência entre reinícios.
 """
 
+import base64
+import os
 import threading
 import time
 import uuid
@@ -16,7 +18,6 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from main import carregar_contatos
 from whatsapp_client import WhatsAppClient, sanitize_phone
 
 app = FastAPI(title="NeoNumera API")
@@ -28,7 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SESSION_DIR = "wa_session"
+SESSION_DIR = os.environ.get("WA_SESSION_DIR", "wa_session")
 
 COLUNA_NOME_CANDIDATOS = ["nome", "name", "cliente", "contato"]
 COLUNA_TELEFONE_CANDIDATOS = ["telefone", "celular", "whatsapp", "phone", "fone", "numero", "número"]
@@ -40,13 +41,34 @@ state = {
     "job": {"running": False, "dry_run": True, "total": 0, "enviados": 0},
 }
 
+login_lock = threading.Lock()
+login_state = {"client": None, "logado": False}
+
 
 def detectar_coluna(colunas, candidatos):
     for coluna in colunas:
-        chave = coluna.strip().lower()
+        chave = str(coluna).strip().lower()
         if any(candidato in chave for candidato in candidatos):
             return coluna
     return None
+
+
+def ler_planilha(caminho, extensao, header=0):
+    if extensao == ".csv":
+        return pd.read_csv(caminho, header=header)
+    return pd.read_excel(caminho, header=header)
+
+
+def montar_contatos(df, col_nome, col_telefone):
+    contatos = []
+    for _, linha in df.iterrows():
+        telefone = linha[col_telefone]
+        if col_nome is not None and not pd.isna(linha[col_nome]):
+            nome = str(linha[col_nome]).strip()
+        else:
+            nome = str(telefone).strip()
+        contatos.append({"nome": nome, "telefone": telefone})
+    return contatos
 
 
 class DispatchRequest(BaseModel):
@@ -66,21 +88,24 @@ async def upload_planilha(file: UploadFile = File(...)):
     with open(caminho_temp, "wb") as f:
         f.write(conteudo)
 
-    if extensao == ".csv":
-        df_preview = pd.read_csv(caminho_temp)
-    else:
-        df_preview = pd.read_excel(caminho_temp)
+    df = ler_planilha(caminho_temp, extensao)
+    col_nome = detectar_coluna(df.columns, COLUNA_NOME_CANDIDATOS)
+    col_telefone = detectar_coluna(df.columns, COLUNA_TELEFONE_CANDIDATOS)
 
-    col_nome = detectar_coluna(df_preview.columns, COLUNA_NOME_CANDIDATOS)
-    col_telefone = detectar_coluna(df_preview.columns, COLUNA_TELEFONE_CANDIDATOS)
-    if not col_nome or not col_telefone:
-        raise HTTPException(
-            422,
-            f"Não foi possível detectar as colunas de nome/telefone. "
-            f"Colunas encontradas: {', '.join(df_preview.columns)}",
-        )
+    if not col_telefone:
+        # Planilha sem cabeçalho: o primeiro número virou nome de coluna por engano.
+        if sanitize_phone(df.columns[0]) or len(df.columns) == 1:
+            df = ler_planilha(caminho_temp, extensao, header=None)
+            col_telefone = df.columns[0]
+            col_nome = None
+        else:
+            raise HTTPException(
+                422,
+                f"Não foi possível detectar a coluna de telefone. "
+                f"Colunas encontradas: {', '.join(str(c) for c in df.columns)}",
+            )
 
-    contatos = carregar_contatos(caminho_temp, col_nome, col_telefone)
+    contatos = montar_contatos(df, col_nome, col_telefone)
     validos, invalidos = 0, 0
     for contato in contatos:
         if sanitize_phone(contato["telefone"]):
@@ -91,11 +116,16 @@ async def upload_planilha(file: UploadFile = File(...)):
     with lock:
         state["contatos"] = contatos
 
+    mapeamento = [{"original": str(col_telefone), "campo": "telefone"}]
+    if col_nome is not None:
+        mapeamento.insert(0, {"original": str(col_nome), "campo": "nome"})
+
     return {
-        "mapeamento": [{"original": col_nome, "campo": "nome"}, {"original": col_telefone, "campo": "telefone"}],
+        "mapeamento": mapeamento,
         "total": len(contatos),
         "validos": validos,
         "invalidos": invalidos,
+        "aviso": None if col_nome else "Planilha sem coluna de nome — o telefone será usado como identificação.",
     }
 
 
@@ -155,6 +185,8 @@ def iniciar_disparo(req: DispatchRequest):
             raise HTTPException(409, "Já existe um disparo em andamento")
         if not state["contatos"]:
             raise HTTPException(400, "Nenhuma planilha carregada. Faça upload primeiro em /api/upload")
+        if not req.dry_run and login_state["client"] is not None:
+            raise HTTPException(409, "Existe um login de WhatsApp em andamento. Finalize-o antes de disparar.")
 
         fila = [
             {
@@ -243,7 +275,52 @@ def analytics():
 
 @app.get("/api/status")
 def status_whatsapp():
-    import os
+    with login_lock:
+        if login_state["logado"]:
+            return {"conectado": True, "sessao": SESSION_DIR}
 
-    conectado = os.path.isdir(SESSION_DIR)
+    conectado = os.path.isdir(SESSION_DIR) and login_state["client"] is None
     return {"conectado": conectado, "sessao": SESSION_DIR}
+
+
+@app.post("/api/login/start")
+def iniciar_login():
+    with login_lock:
+        if login_state["client"] is not None:
+            return {"ja_iniciado": True}
+        if state["job"]["running"]:
+            raise HTTPException(409, "Não é possível logar com um disparo em andamento")
+
+        cliente = WhatsAppClient(session_dir=SESSION_DIR, headless=True)
+        cliente.start()
+        cliente.abrir_pagina_login()
+        login_state["client"] = cliente
+        login_state["logado"] = False
+    return {"started": True}
+
+
+@app.get("/api/login/qr")
+def obter_qr():
+    with login_lock:
+        cliente = login_state["client"]
+        if cliente is None:
+            raise HTTPException(400, "Login não iniciado. Chame /api/login/start primeiro.")
+
+        if cliente.esta_logado():
+            login_state["logado"] = True
+            cliente.close()
+            login_state["client"] = None
+            return {"logado": True, "qr_base64": None}
+
+        png = cliente.screenshot_png()
+        return {"logado": False, "qr_base64": base64.b64encode(png).decode()}
+
+
+@app.post("/api/login/cancel")
+def cancelar_login():
+    with login_lock:
+        if login_state["client"] is not None:
+            login_state["client"].close()
+            login_state["client"] = None
+        login_state["logado"] = False
+    return {"ok": True}

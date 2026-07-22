@@ -1,4 +1,6 @@
-const BASE = "/api";
+// Em produção (ex: frontend no Vercel), aponte para o backend real via VITE_API_URL
+// (ex: https://neonumera-backend.up.railway.app/api). Em dev local, usa o proxy do Vite.
+const BASE = import.meta.env.VITE_API_URL || "/api";
 
 async function handle(res) {
   if (!res.ok) {
@@ -31,4 +33,7 @@ export const api = {
   remover: (id) => fetch(`${BASE}/queue/${id}`, { method: "DELETE" }).then(handle),
   analytics: () => fetch(`${BASE}/analytics`).then(handle),
   status: () => fetch(`${BASE}/status`).then(handle),
+  iniciarLogin: () => fetch(`${BASE}/login/start`, { method: "POST" }).then(handle),
+  obterQr: () => fetch(`${BASE}/login/qr`).then(handle),
+  cancelarLogin: () => fetch(`${BASE}/login/cancel`, { method: "POST" }).then(handle),
 };

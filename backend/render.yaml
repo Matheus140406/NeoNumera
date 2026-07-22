@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: neonumera-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    envVars:
+      - key: WA_SESSION_DIR
+        value: /data/wa_session
+    disk:
+      name: wa-session
+      mountPath: /data
+      sizeGB: 1

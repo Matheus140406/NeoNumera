@@ -270,9 +270,102 @@ function Topbar({ title, onOpenPalette }) {
 }
 
 /* ---------------------------------------------------------------
+   Modal: Conectar WhatsApp (QR Code)
+--------------------------------------------------------------- */
+function QrLoginModal({ open, onClose, onConectado }) {
+  const [qr, setQr] = useState(null);
+  const [erro, setErro] = useState(null);
+  const [logado, setLogado] = useState(false);
+  const pollRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    let cancelado = false;
+    setErro(null);
+    setLogado(false);
+    setQr(null);
+
+    api.iniciarLogin().catch((err) => !cancelado && setErro(err.message));
+
+    const poll = async () => {
+      try {
+        const resposta = await api.obterQr();
+        if (cancelado) return;
+        if (resposta.logado) {
+          setLogado(true);
+          onConectado?.();
+          clearInterval(pollRef.current);
+          return;
+        }
+        setQr(resposta.qr_base64);
+      } catch (err) {
+        if (!cancelado) setErro(err.message || "Falha ao carregar o QR Code");
+      }
+    };
+
+    const timeout = setTimeout(poll, 1500);
+    pollRef.current = setInterval(poll, 3000);
+
+    return () => {
+      cancelado = true;
+      clearTimeout(timeout);
+      clearInterval(pollRef.current);
+    };
+  }, [open]);
+
+  const fechar = () => {
+    if (!logado) api.cancelarLogin().catch(() => {});
+    onClose();
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={fechar}>
+      <div
+        className={`${t.surface} border ${t.border} rounded-lg w-full max-w-sm p-5 flex flex-col items-center gap-3`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <span className={`text-sm font-medium ${t.textPrimary}`}>Conectar WhatsApp</span>
+
+        {logado ? (
+          <div className="flex flex-col items-center gap-2 py-8">
+            <CheckCircle2 size={32} className="text-emerald-400" />
+            <span className={`text-sm ${t.textSecondary}`}>Sessão conectada com sucesso!</span>
+          </div>
+        ) : erro ? (
+          <div className="flex flex-col items-center gap-2 py-8 text-center">
+            <AlertTriangle size={24} className="text-red-400" />
+            <span className={`text-xs ${t.textSecondary}`}>{erro}</span>
+          </div>
+        ) : qr ? (
+          <img src={`data:image/png;base64,${qr}`} alt="QR Code do WhatsApp Web" className="w-full rounded-md border border-zinc-800" />
+        ) : (
+          <div className="py-8">
+            <Skeleton className="w-56 h-56" />
+          </div>
+        )}
+
+        <p className={`text-xs ${t.textFaint} text-center`}>
+          Abra o WhatsApp no celular → Aparelhos conectados → Conectar um aparelho, e aponte a câmera pra tela.
+        </p>
+
+        <button
+          onClick={fechar}
+          className={`w-full text-sm rounded-md py-2 border ${t.border} ${t.textSecondary} ${t.hover} transition-all ${PRESS} ${FOCUS_RING}`}
+        >
+          {logado ? "Fechar" : "Cancelar"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------
    View: Disparo
 --------------------------------------------------------------- */
-function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, setDryRun, pushToast, whatsappConectado }) {
+function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, setDryRun, pushToast, whatsappConectado, onAbrirLogin }) {
   const [dragOver, setDragOver] = useState(false);
   const [mapeamento, setMapeamento] = useState(null);
   const [resumoContatos, setResumoContatos] = useState(null);
@@ -313,13 +406,18 @@ function DispatchConsole({ message, setMessage, cadence, setCadence, dryRun, set
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 p-5">
       <div className="lg:col-span-2 space-y-4">
-        <div className={`${t.surface} border ${t.border} rounded-md px-3 py-2 inline-flex items-center gap-2`}>
+        <button
+          onClick={() => !whatsappConectado && onAbrirLogin?.()}
+          className={`${t.surface} border ${t.border} rounded-md px-3 py-2 inline-flex items-center gap-2 transition-all ${
+            whatsappConectado ? "" : `${t.hover} ${PRESS} ${FOCUS_RING} cursor-pointer`
+          }`}
+        >
           <MessageCircle size={14} className="text-emerald-400" />
           <span className={`text-xs ${t.textSecondary}`}>
-            {whatsappConectado ? "WhatsApp conectado" : "WhatsApp sem sessão (rode --login)"}
+            {whatsappConectado ? "WhatsApp conectado" : "WhatsApp sem sessão — clique para conectar"}
           </span>
           <StatusDot status={whatsappConectado ? "delivered" : "error"} />
-        </div>
+        </button>
 
         <input
           ref={fileInputRef}
@@ -677,6 +775,7 @@ export default function NeoNumeraApp() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [whatsappConectado, setWhatsappConectado] = useState(false);
+  const [loginOpen, setLoginOpen] = useState(false);
 
   const [message, setMessage] = useState("Olá {nome}, seu código de acesso é {codigo}.");
   const [cadence, setCadence] = useState(50);
@@ -689,12 +788,15 @@ export default function NeoNumeraApp() {
     setTimeout(() => setToasts((prev) => prev.filter((tst) => tst.id !== id)), 2600);
   };
 
+  const carregarStatus = useCallback(() => {
+    api.status().then((r) => setWhatsappConectado(r.conectado)).catch(() => {});
+  }, []);
+
   useEffect(() => {
-    const carregarStatus = () => api.status().then((r) => setWhatsappConectado(r.conectado)).catch(() => {});
     carregarStatus();
     const id = setInterval(carregarStatus, 8000);
     return () => clearInterval(id);
-  }, []);
+  }, [carregarStatus]);
 
   const navigate = (id) => {
     if (id === view) return;
@@ -748,6 +850,7 @@ export default function NeoNumeraApp() {
                   setDryRun={setDryRun}
                   pushToast={pushToast}
                   whatsappConectado={whatsappConectado}
+                  onAbrirLogin={() => setLoginOpen(true)}
                 />
               )}
               {view === "analytics" && <AnalyticsView whatsappConectado={whatsappConectado} />}
@@ -762,6 +865,14 @@ export default function NeoNumeraApp() {
       </div>
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={navigate} />
+      <QrLoginModal
+        open={loginOpen}
+        onClose={() => setLoginOpen(false)}
+        onConectado={() => {
+          carregarStatus();
+          pushToast("WhatsApp conectado com sucesso!");
+        }}
+      />
       <ToastStack toasts={toasts} />
     </div>
   );
