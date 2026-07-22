@@ -1,8 +1,10 @@
 """Automação do WhatsApp Web via Playwright (sem pyautogui)."""
 
+import random
 import re
 import time
 import urllib.parse
+from datetime import datetime, time as dt_time
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -51,10 +53,9 @@ class WhatsAppClient:
             print("Tempo esgotado esperando o login. Tente novamente.")
             return False
 
-    def send_message(self, phone, message, wait_after_load=6):
+    def send_message(self, phone, message, wait_after_load=6, humanize=True):
         """Envia `message` para `phone` (formato 55DDNNNNNNNNN). Retorna (status, detalhe)."""
-        encoded_message = urllib.parse.quote(message)
-        url = f"{WHATSAPP_URL}/send?phone={phone}&text={encoded_message}"
+        url = f"{WHATSAPP_URL}/send?phone={phone}"
         self.page.goto(url)
 
         try:
@@ -83,12 +84,40 @@ class WhatsAppClient:
         try:
             message_box = self.page.locator(SEL_MESSAGE_BOX).last
             message_box.click()
+            if humanize:
+                self._digitar_humanizado(message)
+            else:
+                message_box.type(message)
             self.page.keyboard.press("Enter")
             time.sleep(2)
         except Exception as exc:
             return "ERRO_ENVIO", str(exc)
 
         return "ENVIADO", ""
+
+    def _digitar_humanizado(self, texto):
+        """Digita `texto` caractere a caractere com atrasos aleatórios, simulando toque humano."""
+        for linha_idx, linha in enumerate(texto.split("\n")):
+            if linha_idx > 0:
+                self.page.keyboard.press("Shift+Enter")
+            for char in linha:
+                self.page.keyboard.type(char, delay=random.uniform(40, 160))
+                if random.random() < 0.03:
+                    time.sleep(random.uniform(0.3, 0.9))
+
+
+def dentro_do_horario_comercial(inicio, fim, agora=None):
+    """Verifica se `agora` (datetime.time, padrão: horário atual) está entre `inicio` e `fim`."""
+    agora = agora or datetime.now().time()
+    if inicio <= fim:
+        return inicio <= agora <= fim
+    return agora >= inicio or agora <= fim
+
+
+def parse_hora(texto):
+    """Converte 'HH:MM' em datetime.time."""
+    horas, minutos = texto.split(":")
+    return dt_time(int(horas), int(minutos))
 
 
 def sanitize_phone(raw_phone):

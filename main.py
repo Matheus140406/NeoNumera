@@ -11,7 +11,12 @@ from datetime import datetime
 
 import pandas as pd
 
-from whatsapp_client import WhatsAppClient, sanitize_phone
+from whatsapp_client import (
+    WhatsAppClient,
+    dentro_do_horario_comercial,
+    parse_hora,
+    sanitize_phone,
+)
 
 
 def parse_args():
@@ -22,7 +27,28 @@ def parse_args():
     parser.add_argument(
         "--mensagem",
         required=True,
-        help="Texto da mensagem (use {nome} para personalizar) ou caminho para um arquivo .txt",
+        help="Texto da mensagem / Template A (use {nome} para personalizar) ou caminho para um arquivo .txt",
+    )
+    parser.add_argument(
+        "--mensagem-b",
+        default=None,
+        help="Template B opcional para teste A/B (texto ou caminho .txt). "
+        "Se informado, cada contato recebe A ou B aleatoriamente (50/50).",
+    )
+    parser.add_argument(
+        "--business-hours-start",
+        default="08:00",
+        help="Início do horário comercial (HH:MM)",
+    )
+    parser.add_argument(
+        "--business-hours-end",
+        default="20:00",
+        help="Fim do horário comercial (HH:MM)",
+    )
+    parser.add_argument(
+        "--ignore-business-hours",
+        action="store_true",
+        help="Ignora a checagem de horário comercial",
     )
     parser.add_argument("--col-nome", default="Nome", help="Nome da coluna com o nome do contato")
     parser.add_argument(
@@ -81,19 +107,22 @@ class Relatorio:
         self.caminho = caminho
         self.linhas = []
 
-    def registrar(self, nome, telefone, status, detalhe=""):
+    def registrar(self, nome, telefone, status, detalhe="", variante=""):
         self.linhas.append(
             {
                 "nome": nome,
                 "telefone": telefone,
                 "status": status if not detalhe else f"{status}: {detalhe}",
+                "variante": variante,
                 "timestamp": datetime.now().isoformat(timespec="seconds"),
             }
         )
 
     def salvar(self):
         with open(self.caminho, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["nome", "telefone", "status", "timestamp"])
+            writer = csv.DictWriter(
+                f, fieldnames=["nome", "telefone", "status", "variante", "timestamp"]
+            )
             writer.writeheader()
             writer.writerows(self.linhas)
         print(f"Relatório salvo em {self.caminho} ({len(self.linhas)} registros)")
@@ -112,7 +141,10 @@ def main():
         return
 
     contatos = carregar_contatos(args.planilha, args.col_nome, args.col_telefone)
-    template_mensagem = carregar_mensagem(args.mensagem)
+    template_a = carregar_mensagem(args.mensagem)
+    template_b = carregar_mensagem(args.mensagem_b) if args.mensagem_b else None
+    hora_inicio = parse_hora(args.business_hours_start)
+    hora_fim = parse_hora(args.business_hours_end)
     relatorio = Relatorio(args.relatorio)
 
     cliente = WhatsAppClient(session_dir=args.session_dir, headless=True)
@@ -125,12 +157,26 @@ def main():
             telefone_original = contato["telefone"]
             telefone = sanitize_phone(telefone_original)
 
+            if not args.ignore_business_hours:
+                while not dentro_do_horario_comercial(hora_inicio, hora_fim):
+                    print(
+                        f"Fora do horário comercial ({args.business_hours_start}-"
+                        f"{args.business_hours_end}). Aguardando 5 min..."
+                    )
+                    time.sleep(300)
+
             print(f"[{i}/{total}] {nome} ({telefone_original}) -> ", end="", flush=True)
 
             if telefone is None:
                 print("NUMERO_INVALIDO")
                 relatorio.registrar(nome, telefone_original, "NUMERO_INVALIDO")
                 continue
+
+            variante = "A"
+            template_mensagem = template_a
+            if template_b and random.random() < 0.5:
+                variante = "B"
+                template_mensagem = template_b
 
             mensagem = template_mensagem.replace("{nome}", nome)
 
@@ -140,7 +186,7 @@ def main():
                 status, detalhe = "ERRO", str(exc)
 
             print(status)
-            relatorio.registrar(nome, telefone, status, detalhe)
+            relatorio.registrar(nome, telefone, status, detalhe, variante=variante if template_b else "")
 
             if i == total:
                 break
