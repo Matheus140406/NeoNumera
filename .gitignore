@@ -1,0 +1,6 @@
+wa_session/
+relatorio_envios.csv
+__pycache__/
+*.pyc
+.venv/
+venv/
